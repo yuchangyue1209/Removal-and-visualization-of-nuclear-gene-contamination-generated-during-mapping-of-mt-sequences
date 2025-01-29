@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# Input and output directories
+INPUT_DIR="/work/cyu/poolseq/PPalign_output/mapped"
+OUTPUT_DIR="/work/cyu/poolseq/PPalign_output/mapped"
+COVERAGE_DIR="/work/cyu/poolseq/PPalign_output/coverage"
+mkdir -p "$COVERAGE_DIR"
+
+# Process all sorted BAM files
+for BAM_FILE in "${OUTPUT_DIR}"/*_sorted.bam; do
+    BASENAME=$(basename "$BAM_FILE" _sorted.bam)
+    COVERAGE_FILE="${COVERAGE_DIR}/${BASENAME}_coverage.txt"
+    
+    echo "Calculating depth for $BAM_FILE..."
+    samtools depth "$BAM_FILE" > "$COVERAGE_FILE"
+    
+    # Detect numts regions
+    AVG_COV=$(awk '{sum+=$3} END {print sum/NR}' "$COVERAGE_FILE")
+    awk -v avg="$AVG_COV" '$3 > 2*avg' "$COVERAGE_FILE" > "${COVERAGE_DIR}/${BASENAME}_numts_candidates.bed"
+    
+    # Filter by mapping quality
+    samtools view -h -L "${COVERAGE_DIR}/${BASENAME}_numts_candidates.bed" "$BAM_FILE" | \
+        awk '{if($5 < 30) print $0}' > "${COVERAGE_DIR}/${BASENAME}_lowMAPQ_reads.sam"
+    
+    # Validate against nuclear genome
+    bwa mem -t 8 /path/to/nuclear_ref.fa "${COVERAGE_DIR}/${BASENAME}_lowMAPQ_reads.sam" | \
+        samtools view -Sb - > "${COVERAGE_DIR}/${BASENAME}_nuclear_mapped.bam"
+    
+    NUM_NUCLEAR_READS=$(samtools view -c "${COVERAGE_DIR}/${BASENAME}_nuclear_mapped.bam")
+    if [ "$NUM_NUCLEAR_READS" -gt $(($(wc -l < "${COVERAGE_DIR}/${BASENAME}_lowMAPQ_reads.sam") / 2)) ]; then
+        echo "Potential numts region detected in ${BASENAME}"
+        mv "${COVERAGE_DIR}/${BASENAME}_numts_candidates.bed" "${COVERAGE_DIR}/${BASENAME}_numts_confirmed.bed"
+    else
+        rm "${COVERAGE_DIR}/${BASENAME}_numts_candidates.bed"
+    fi
+done
+
+# Merge all numts regions
+cat "${COVERAGE_DIR}"/*_numts_confirmed.bed | sort -k1,1 -k2,2n | bedtools merge -i - > "${COVERAGE_DIR}/all_numts_regions.bed"
+
+echo "Numts detection completed. Results saved in ${COVERAGE_DIR}/all_numts_regions.bed"
